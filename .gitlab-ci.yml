@@ -1,0 +1,7 @@
+stages:
+  - test
+
+playwright-tests:
+  stage: test
+  script:
+    - echo "CI is running"
