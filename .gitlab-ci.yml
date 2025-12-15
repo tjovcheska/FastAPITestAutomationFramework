@@ -3,5 +3,6 @@ stages:
 
 playwright-tests:
   stage: test
+  image: ubuntu:latest
   script:
     - echo "CI is running"
