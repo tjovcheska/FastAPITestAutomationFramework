@@ -1,26 +1,157 @@
 name: Playwright Tests
+
 on:
   push:
-    branches: [ setup-ci ]
+    branches:
+      - setup-ci
 
 jobs:
-  test:
+  test-playwright:
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
+    - uses: actions/checkout@v6
+    - uses: actions/setup-node@v6
       with:
         node-version: lts/*
-    - name: Install dependencies
-      run: npm ci
-    - name: Install Playwright Browsers
+        cache: 'npm'
+        cache-dependency-path: tests/package-lock.json
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.10'
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "0.4.15"
+        enable-cache: true
+    - name: Create .env file
+      run: |
+        # Generate secret key using Python (same as locally)
+        SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+        
+        cat > .env << EOF
+        # Project Configuration
+        PROJECT_NAME=FastAPI Web Automation Framework
+        ENVIRONMENT=local
+        DOMAIN=localhost
+        STACK_NAME=fastapi-web-automation
+        
+        # Database Configuration
+        POSTGRES_SERVER=db
+        POSTGRES_PORT=5432
+        POSTGRES_USER=postgres
+        POSTGRES_PASSWORD=changethis
+        POSTGRES_DB=app
+        
+        # Security
+        SECRET_KEY=${SECRET_KEY}
+        
+        # First Superuser (for tests)
+        FIRST_SUPERUSER=admin@example.com
+        FIRST_SUPERUSER_PASSWORD=changethis
+        
+        # Frontend Configuration
+        FRONTEND_HOST=http://localhost:5173
+        BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+        
+        # SMTP Configuration (using mailcatcher for local)
+        SMTP_HOST=mailcatcher
+        SMTP_PORT=1025
+        SMTP_TLS=false
+        SMTP_USER=
+        SMTP_PASSWORD=
+        EMAILS_FROM_EMAIL=noreply@example.com
+        
+        # Docker Image Configuration
+        DOCKER_IMAGE_BACKEND=backend
+        DOCKER_IMAGE_FRONTEND=frontend
+        TAG=latest
+        
+        # Sentry (optional)
+        SENTRY_DSN=
+        EOF
+    - run: uv sync
+      working-directory: backend
+    - run: npm ci
+      working-directory: tests
+    - run: uv run bash scripts/generate-client.sh
+      env:
+        VIRTUAL_ENV: backend/.venv
+    - run: docker compose build
+    - run: docker compose down -v --remove-orphans
+    - name: Start all services with docker compose watch
+      run: |
+        # Start docker compose watch in the background
+        docker compose watch > /tmp/docker-compose-watch.log 2>&1 &
+        WATCH_PID=$!
+        echo "Started docker compose watch (PID: $WATCH_PID)"
+        echo $WATCH_PID > /tmp/watch.pid
+        
+        # Wait for database to be ready
+        echo "Waiting for database to be ready..."
+        timeout 120 bash -c 'until docker compose exec -T db pg_isready -U postgres 2>/dev/null; do sleep 2; done' || (echo "Database failed to start. Logs:" && docker compose logs db && exit 1)
+        echo "Database is ready!"
+        
+        # Wait for backend to be healthy
+        echo "Waiting for backend to be healthy..."
+        timeout 120 bash -c 'until curl -f http://localhost:8000/api/v1/utils/health-check/ 2>/dev/null; do sleep 2; done' || (echo "Backend failed to start. Logs:" && docker compose logs backend && exit 1)
+        echo "Backend is ready!"
+        
+        # Wait for frontend to be ready
+        echo "Waiting for frontend to be ready..."
+        timeout 60 bash -c 'until curl -f http://localhost:5173 > /dev/null 2>&1; do sleep 2; done' || (echo "Frontend failed to start. Logs:" && docker compose logs frontend && exit 1)
+        echo "Frontend is ready!"
+    - name: Verify services are running
+      run: |
+        echo "Checking services..."
+        docker compose ps
+        echo "Backend health check..."
+        curl -f http://localhost:8000/api/v1/utils/health-check/ || (echo "Backend health check failed. Logs:" && docker compose logs backend && exit 1)
+        echo "Frontend check..."
+        curl -f http://localhost:5173 > /dev/null 2>&1 || (echo "Frontend check failed. Logs:" && docker compose logs frontend && exit 1)
+        echo "All services are ready!"
+    - name: Install Playwright browsers
       run: npx playwright install --with-deps
+      working-directory: tests
     - name: Run Playwright tests
-      run: npx playwright test
-    - uses: actions/upload-artifact@v4
+      run: npx playwright test --fail-on-flaky-tests --trace=retain-on-failure
+      working-directory: tests
+      env:
+        CI: true
+        FIRST_SUPERUSER: admin@example.com
+        FIRST_SUPERUSER_PASSWORD: changethis
+        API_BASE_URL: http://localhost:8000
+        FRONTEND_BASE_URL: http://localhost:5173
+    - name: Upload test results
       if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v5
       with:
         name: playwright-report
-        path: playwright-report/
+        path: tests/playwright-report/
         retention-days: 30
+        include-hidden-files: true
+    - name: Upload test artifacts
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v5
+      with:
+        name: test-results
+        path: tests/test-results/
+        retention-days: 7
+        include-hidden-files: true
+    - name: Cleanup
+      if: always()
+      run: |
+        # Stop docker compose watch if it's still running
+        if [ -f /tmp/watch.pid ]; then
+          WATCH_PID=$(cat /tmp/watch.pid)
+          if [ -n "$WATCH_PID" ] && kill -0 $WATCH_PID 2>/dev/null; then
+            echo "Stopping docker compose watch (PID: $WATCH_PID)..."
+            kill $WATCH_PID 2>/dev/null || true
+            wait $WATCH_PID 2>/dev/null || true
+          fi
+        fi
+        docker compose down -v --remove-orphans
+        if [ -f /tmp/docker-compose-watch.log ]; then
+          echo "=== Docker Compose Watch Logs ==="
+          tail -100 /tmp/docker-compose-watch.log || true
+        fi
