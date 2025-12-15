@@ -1,53 +1,79 @@
-// fixtures/authenticatedAPI.fixture.ts
-import { test as base, APIRequestContext, APIResponse } from '@playwright/test';
+import { expect } from '@playwright/test';
 
-import { loginViaApi } from '../../utils/apiAuthentication';
-import { API_BASE_URL } from '../../utils/constants';
+import { test } from '../../fixtures/authenticatedAPI.fixture';
+import { API_ENDPOINTS } from '../../utils/constants';
 
-type AuthenticatedRequest = {
-  get: (url: string, options?: Parameters<APIRequestContext['get']>[1]) => Promise<APIResponse>;
-  post: (url: string, options?: Parameters<APIRequestContext['post']>[1]) => Promise<APIResponse>;
-  put: (url: string, options?: Parameters<APIRequestContext['put']>[1]) => Promise<APIResponse>;
-  patch: (url: string, options?: Parameters<APIRequestContext['patch']>[1]) => Promise<APIResponse>;
-  delete: (url: string, options?: Parameters<APIRequestContext['delete']>[1]) => Promise<APIResponse>;
-};
-
-type AuthenticatedApiFixtures = {
-  authenticatedApi: AuthenticatedRequest;
-  authToken: string;
-};
-
-// Extend Playwright test
-export const test = base.extend<AuthenticatedApiFixtures>({
-  // Fixture for auth token
-  authToken: async ({}, use) => {
-    const token = await loginViaApi();
-    await use(token);
-  },
-
-  // Fixture for authenticated API requests
-  authenticatedApi: async ({ request, authToken }, use) => {
-    const authHeader = `Bearer ${authToken}`;
-
-    // Generic wrapper for API methods to avoid repetition
-    const wrap = <K extends keyof AuthenticatedRequest>(method: K) =>
-      (url: string, options?: any) =>
-        (request[method] as any)(`${API_BASE_URL}${url}`, {
-          ...options,
-          headers: {
-            Authorization: authHeader,
-            ...options?.headers,
-          },
-        });
-
-    const authenticatedRequest: AuthenticatedRequest = {
-      get: wrap('get'),
-      post: wrap('post'),
-      put: wrap('put'),
-      patch: wrap('patch'),
-      delete: wrap('delete'),
+test.describe('Items API Endpoints Tests', () => {
+  /**
+   * Test 1: Read Items List - Success
+   * Verifies that reading items list returns correct structure with data and count
+   */
+  test('should read items list successfully', async ({ authenticatedApi }) => {
+    // Create an item first to ensure we have at least one item
+    const itemData = {
+      title: `Test Item for List ${Date.now()}`,
+      description: 'Test description',
     };
+    await authenticatedApi.post(API_ENDPOINTS.ITEMS, {
+      data: itemData,
+    });
 
-    await use(authenticatedRequest);
-  },
+    const listResponse = await authenticatedApi.get(API_ENDPOINTS.ITEMS);
+
+    expect(listResponse.status()).toBe(200);
+    const itemsData = await listResponse.json();
+    expect(itemsData).toHaveProperty('data');
+    expect(itemsData).toHaveProperty('count');
+    expect(Array.isArray(itemsData.data)).toBeTruthy();
+    expect(typeof itemsData.count).toBe('number');
+    expect(itemsData.count).toBeGreaterThanOrEqual(0);
+  });
+
+  /**
+   * Test 2: Read Item by ID - Success
+   * Verifies that reading an item by ID returns correct item data
+   */
+  test('should read item by ID successfully', async ({ authenticatedApi }) => {
+    // Create an item first
+    const itemData = {
+      title: `Test Item for Read ${Date.now()}`,
+      description: 'Test description for read',
+    };
+    const createResponse = await authenticatedApi.post(API_ENDPOINTS.ITEMS, {
+      data: itemData,
+    });
+    const createdItem = await createResponse.json();
+    const itemId = createdItem.id;
+
+    // Read the item by ID
+    const readResponse = await authenticatedApi.get(
+      `${API_ENDPOINTS.ITEMS}/${itemId}`
+    );
+
+    expect(readResponse.status()).toBe(200);
+    const item = await readResponse.json();
+    expect(item.id).toBe(itemId);
+    expect(item.title).toBe(itemData.title);
+    expect(item.description).toBe(itemData.description);
+    expect(item).toHaveProperty('owner_id');
+  });
+
+  /**
+   * Test 3: Read Item by ID - Not Found
+   * Verifies that reading a non-existent item returns 404
+   */
+  test('should return 404 when reading non-existent item', async ({
+    authenticatedApi,
+  }) => {
+    const fakeId = '00000000-0000-0000-0000-000000000000';
+
+    const readResponse = await authenticatedApi.get(
+      `${API_ENDPOINTS.ITEMS}/${fakeId}`
+    );
+
+    expect(readResponse.status()).toBe(404);
+    const errorData = await readResponse.json();
+    expect(errorData).toHaveProperty('detail');
+    expect(errorData.detail).toBe('Item not found');
+  });
 });
