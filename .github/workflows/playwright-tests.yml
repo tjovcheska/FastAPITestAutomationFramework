@@ -73,6 +73,8 @@ jobs:
     - run: uv sync
       working-directory: backend
     - run: npm ci
+      working-directory: frontend
+    - run: npm ci
       working-directory: tests
     - run: uv run bash scripts/generate-client.sh
       env:
